@@ -1,0 +1,94 @@
+Домашнее Задание
+
+1.Уменьшить том под / до 8G.
+2.Выделить том под /home.
+3.Выделить том под /var - сделать в mirror.
+4./home - сделать том для снапшотов.
+5.Прописать монтирование в fstab. Попробовать с разными опциями и разными файловыми системами (на выбор).
+6.Работа со снапшотами:
+сгенерить файлы в /home/;
+снять снапшот;
+удалить часть файлов;
+восстановиться со снапшота.
+
+создаем PV 
+pvcreate /dev/sdb
+
+задаем уровень первый уровень абстракции VG
+vgcreate vg_root /dev/sdb
+
+создаем LV
+lvcreate -n lv_root -l 100%FREE /dev/vg_root
+
+создаем и монтируем файловую систему 
+mkfs.ext4 /dev/vg_root/lv/root
+mount /dev/vg_root/lv_root /mnt
+
+конфигурируем grub, имитируем текущий root, делаем в него chroot и обновляем grub
+for i in /proc/ /sys/ /dev/ /run/ /boot/; do mount --bind $i /mnt/$i; done
+chroot /mnt/
+grub-mkconfig -o /boot/grub/grub.cfg
+
+обновляем образ initrd
+update-initramfs -u
+
+перезагружаем систему
+reboot
+
+уменьшаем старый VG и возвращаем на него рут
+lvremove /dev/debian-vg/debian-lv
+lvcreate -n debian-vg/debian-lv -L 8G /dev/debian-vg
+mkfs.ext4 /dev/debian-vg/debian-lv /mnt
+rsync -avxHAX --progress / /mnt/
+for i in /proc/ /sys/ /dev/ /run/ /boot/; do mount --bind $i /mnt/$i; done
+chroot /mnt/
+grub-mkconfig -o /boot/grub/grub.cfg
+update-initframfs -u
+
+Выделяем том под /var в зеркало
+pvcreate /dev/sdc /dev/sdd
+vgcreate vg_var /dev/sdc /dev/sdd
+lvcreate -L 950 -m1 -n lv_var vg_var
+
+Создаем фс и перемещаем туда /var
+mkfs.ext4 /dev/vg_var/lv_var
+
+mount /dev/vg_var/lv_var /mnt
+cp -aR /var/* /mnt/
+
+сохраняем дубликат старого var 
+mkdir /tmp/oldvar && mv /var/* /tmp/oldvar
+
+отмонтируем каталог /mnt и монтируем новый var в каталог /var
+umount /mnt
+mount /dev/vg_var/lv_var /var
+
+Редактируем fstab
+echo "`blkid | grep var: | awk '{print $2}'` /var ext4 defaults 0 0" >> grep /etc/fstab
+
+Выделяем том под /home
+lvcreate -n LogVol_Home -L 2G /dev/debian-vg
+mkfs.ext4 /dev/debian-vg/LogVol_Home
+mount /dev/debian-vg/LogVol_Home /mnt/
+cp -aR /home/* /mnt/
+rm -rf /home/*
+umount /mnt
+mount /dev/debian-vg/LogVol_Home /home/
+
+echo "`blkid | grep Home | awk '{print $2}'` /home xfs defaults 0 0" >> grep /etc/fstab 
+
+
+Снапшоты
+Генерируем файлы в /home
+touch /home/file{1..20}
+
+Снимаем снапшот
+lvcreate -L 100MB -s -n home_snap /dev/debian-vg/LogVol_Home
+
+Удаляем часть файлов
+rm -f /home/file{11..20}
+
+Восстанавливаем файлы из снапшота
+umount /home
+lvconvert --merge /dev/debian-vg/home_snap
+mount /dev/mapper/debian-vg/LogVol_Home /home
