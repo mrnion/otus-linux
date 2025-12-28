@@ -1,0 +1,206 @@
+Домашнее задание
+1.Написать service, который будет раз в 30 секунд мониторить лог на предмет наличия ключевого слова (файл лога и ключевое слово должны задаваться в /etc/default).
+2.Установить spawn-fcgi и создать unit-файл (spawn-fcgi.sevice) с помощью переделки init-скрипта (https://gist.github.com/cea2k/1318020).
+3.Доработать unit-файл Nginx (nginx.service) для запуска нескольких инстансов сервера с разными конфигурационными файлами одновременно.
+
+
+1.Написать service, который будет раз в 30 секунд мониторить лог на предмет наличия ключевого слова (файл лога и ключевое слово должны задаваться в /etc/default).
+
+Создаем файл конфигурации для сервиса и записываем туда переменные
+
+nano /etc/default/watchlog
+
+WORD=ALERT
+LOG=/var/log/watchlog.log
+
+Создаем файл /var/log/watchlog.log и записываем туда произвольные строки плюс ключевое слово из файла /etc/default/watchlog
+
+Создаем файл /opt/watchlog.sh и записываем туда следующий скрипт:
+
+#!/bin/bash
+
+WORD=$1
+LOG=$2
+DATE='date'
+
+if grep $SWORD $LOG &> /dev/null
+then
+logger "$DATE: I found word, Master!"
+else
+exit 0
+fi
+
+Добавим права на запуск файла:
+chmod +x /opt/watchlog.sh 
+
+Создадим юнит для сервиса:
+nano /etc/systemd/system/watchlog.service
+
+[Unit]
+Description=My watchlog service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/watchlog
+ExecStart=/opt/watchlog.sh $WORD $LOG
+
+Создадим юнит для таймера
+nano /etc/systemd/system/watchlog.timer
+
+[Unit]
+Description=Run watchlog script every 30 second
+
+[Timer]
+#Run every 30 second
+OnUnitActiveSec=30
+Unit=watchlog.service
+
+[Install]
+WantedBy=multi-user.target
+
+Запускаем timer и проверяем результат
+
+systemctl start watchlog.timer
+tail -n 1000 /var/log/syslog | grep word
+
+2.Установить spawn-fcgi и создать unit-файл (spawn-fcgi.sevice) с помощью переделки init-скрипта (https://gist.github.com/cea2k/1318020).
+
+Устанавливаем spawn-fcgi 
+apt install spawn-fcgi php php-cgi hph-cli apache2 libapache2-mod-fcgid -y
+
+Создаем файл с настройками для сервиса:
+nano /etc/spawn-fcgi/fcgi.conf
+
+# You must set some working options before the "spawn-fcgi" service will work.
+# If SOCKET points to a file, then this file is cleaned up by the init script.
+#
+# See spawn-fcgi(1) for all possible options.
+#
+# Example :
+SOCKET=/var/run/php-fcgi.sock
+OPTIONS="-u www-data -g www-data -s $SOCKET -S -M 0600 -C 32 -F 1 -- /usr/bin/php-cgi"
+
+Создаем unit-файл
+nano /etc/systemd/system/spawn-fcgi.service
+
+[Unit]
+Description=Spawn-fcgi startup service by Otus
+After=network.target
+
+[Service]
+Type=simple
+PIDFile=/var/run/spawn-fcgi.pid
+EnvironmentFile=/etc/spawn-fcgi/fcgi.conf
+ExecStart=/usr/bin/spawn-fcgi -n $OPTIONS
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+
+Проверяем работу:
+systemctl start spawn-fcgi
+systemctl status spawn-fcgi
+
+3.Доработать unit-файл Nginx (nginx.service) для запуска нескольких инстансов сервера с разными конфигурационными файлами одновременно.
+
+Устанавливаем nginx
+
+apt install nginx
+
+Модифицируем исходный service для запуска нескольких экземпляров сервиса и использования различнной конфигурации
+
+nano /etc/systemd/system/nginx@.service
+
+# Stop dance for nginx
+# =======================
+#
+# ExecStop sends SIGSTOP (graceful stop) to the nginx process.
+# If, after 5s (--retry QUIT/5) nginx is still running, systemd takes control
+# and sends SIGTERM (fast shutdown) to the main process.
+# After another 5s (TimeoutStopSec=5), and if nginx is alive, systemd sends
+# SIGKILL to all the remaining processes in the process group (KillMode=mixed).
+#
+# nginx signals reference doc:
+# http://nginx.org/en/docs/control.html
+#
+[Unit]
+Description=A high performance web server and a reverse proxy server
+Documentation=man:nginx(8)
+After=network.target nss-lookup.target
+
+[Service]
+Type=forking
+PIDFile=/run/nginx-%I.pid
+ExecStartPre=/usr/sbin/nginx -t -c /etc/nginx/nginx-%I.conf -q -g 'daemon on; master_process on;'
+ExecStart=/usr/sbin/nginx -c /etc/nginx/nginx-%I.conf -g 'daemon on; master_process on;'
+ExecReload=/usr/sbin/nginx -c /etc/nginx/nginx-%I.conf -g 'daemon on; master_process on;' -s reload
+ExecStop=-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /run/nginx-%I.pid
+TimeoutStopSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+
+
+Далее создаем два файла конфигурации, nginx-first.conf и nginx-second.conf
+
+Первый файл конфигурации:
+nano /etc/nginx/nginx-first.conf
+
+user www-data;
+worker_processes auto;
+pid /run/nginx-first.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+	worker_connections 768;
+	# multi_accept on;
+}
+
+http {
+
+    server {
+        listen       9001;
+        server_name  first_server;
+        root         /usr/share/nginx/html;
+
+        location / {
+        }
+    }
+}
+
+Второй файл конфигурации:
+
+nano /etc/nginx/nginx-second.conf
+
+user www-data;
+worker_processes auto;
+pid /run/nginx-second.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+	worker_connections 768;
+	# multi_accept on;
+}
+
+http {
+
+    server {
+        listen       9002;
+        server_name  second_server;
+        root         /usr/share/nginx/html;
+
+        location / {
+        }
+    }
+}
+
+Проверяем запуск сервисов, порты которые слушаются и список процессов
+
+systemctl start nginx@first
+systemctl start nginx@second
+systemctl status nginx@first
+systemctl status nginx@second
+
+ss -tnulp | grep nginx
+ps afx |grep nginx
