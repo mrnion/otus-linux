@@ -1,0 +1,91 @@
+Написать скрипт для CRON, который раз в час формирует отчёт и отправляет его на заданную почту.
+
+Отчёт должен содержать:
+
+IP-адреса с наибольшим числом запросов (с момента последнего запуска);
+Запрашиваемые URL с наибольшим числом запросов (с момента последнего запуска);
+Ошибки веб-сервера/приложения (с момента последнего запуска);
+HTTP-коды ответов с указанием их количества (с момента последнего запуска).
+
+Скрипт должен предотвращать одновременный запуск нескольких копий, до его завершения.
+
+В письме должен быть прописан обрабатываемый временной диапазон.
+
+Решение:
+
+Для ежечасного запуска скрипт `weblog_report.sh` необходимо поместить в папку `/etc/cron.hourly/`
+
+Сам скрипт ниже:
+
+#!/bin/bash
+
+# Настройки
+LOG_FILE="/var/log/............."  # путь к логу веб‑сервера (в примере, за основу был взят лог файл apache)
+REPORT_FILE="/tmp/weblog_report_$(date +\%Y\%m\%d\%H\%M\%S).txt"
+EMAIL_TO="your-email@example.com"            # адрес получателя
+SCRIPT_LOCK="/tmp/weblog_report.lock"     # файл блокировки
+
+# Проверка на одновременный запуск
+if [ -f "$SCRIPT_LOCK" ]; then
+    echo "Скрипт уже выполняется. Выход."
+    exit 1
+fi
+
+# Создаём файл блокировки
+touch "$SCRIPT_LOCK"
+
+# Временной диапазон (с момента последнего запуска)
+LAST_RUN_FILE="/tmp/last_weblog_run.txt"
+if [ -f "$LAST_RUN_FILE" ]; then
+    LAST_RUN=$(cat "$LAST_RUN_FILE")
+else
+    LAST_RUN="1990-01-01 00:00:00"
+fi
+
+CURRENT_RUN=$(date +"%Y-%m-%d %H:%M:%S")
+echo "$CURRENT_RUN" > "$LAST_RUN_FILE"
+
+# Фильтруем логи за период
+grep "^$(date -d "$LAST_RUN" +"%d/%b/%Y:%H:%M")" "$LOG_FILE" > /tmp/filtered_log.txt
+
+# IP‑адреса с наибольшим числом запросов
+echo "IP-адреса с наибольшим числом запросов:" >> "$REPORT_FILE"
+awk '{print $1}' /tmp/filtered_log.txt | sort | uniq -c | sort -nr | head -10 >> "$REPORT_FILE"
+echo "" >> "$REPORT_FILE"
+
+# Запрашиваемые URL с наибольшим числом запросов
+echo "Запрашиваемые URL с наибольшим числом запросов:" >> "$REPORT_FILE"
+awk '{print $7}' /tmp/filtered_log.txt | sort | uniq -c | sort -nr | head -10 >> "$REPORT_FILE"
+echo "" >> "$REPORT_FILE"
+
+# Ошибки веб‑сервера (HTTP-коды 4xx, 5xx)
+echo "Ошибки веб‑сервера (4xx, 5xx):" >> "$REPORT_FILE"
+grep -E ' "[45][0-9][0-9] "' /tmp/filtered_log.txt | awk '{print $9, $7}' | sort | uniq -c | sort -nr >> "$REPORT_FILE"
+echo "" >> "$REPORT_FILE"
+
+# HTTP‑коды ответов с их количеством
+echo "HTTP-коды ответов:" >> "$REPORT_FILE"
+awk '{print $9}' /tmp/filtered_log.txt | grep -E '^[1-5][0-9][0-9]$' | sort | uniq -c | sort -nr >> "$REPORT_FILE"
+
+# Формируем письмо для отчета
+SUBJECT="Отчёт по веб‑логам за $LAST_RUN — $CURRENT_RUN"
+BODY="
+Отчёт по веб‑логам за период:
+  Начало: $LAST_RUN
+  Конец:  $CURRENT_RUN
+
+Содержание отчёта:
+$(cat "$REPORT_FILE")
+
+--
+Автоматизированный отчёт.
+"
+
+# Отправляем письмо
+echo "$BODY" | mail -s "$SUBJECT" "$EMAIL_TO"
+
+# Удаляем временные файлы
+rm -f /tmp/filtered_log.txt "$REPORT_FILE" "$SCRIPT_LOCK"
+
+exit 0
+
