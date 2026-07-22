@@ -96,7 +96,6 @@ InetRouter-CentrlRouter network:
 
 На основании схемы получаем готовый список серверов:
 
-Server	IP and Bitmask
 inetRouter
 Default-NAT address VirtualBox
 192.168.255.1/30
